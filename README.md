@@ -52,7 +52,11 @@ Si ambas condiciones se cumplen (inactividad ≥ límite configurado **y** volum
 
 1. Descarga ambos archivos en la misma carpeta.
 2. Click derecho en `Instalar-AutoSuspend.ps1` → **Ejecutar con PowerShell como administrador**.
-3. Listo. El instalador configura la tarea y se elimina automáticamente.
+   2.1. En caso de que no aparezca la opcion de **Ejecutar con PoweShell como administrador"" y/o mande error:
+         Abrir powershell como adminstrador y ejecutar los siguientes comandos:
+         cd "direccion de los scripts" (ejemplo: cd D:\Documentos\Scripts)
+         powershell -ExecutionPolicy Bypass -File .\Instalar-AutoSuspend.ps1   
+4. Listo. El instalador configura la tarea y se elimina automáticamente.
 
 El script se ejecutará de forma automática:
 - Al iniciar sesión en Windows.
