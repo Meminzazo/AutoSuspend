@@ -3,10 +3,12 @@
 # ==============================================================================
 
 # --- CONFIGURACIÓN ---
-$idleLimitMinutes     = 25
+$idleLimitMinutes     = 35
 $checkIntervalSeconds = 60
 $idleLimitSeconds     = $idleLimitMinutes * 60
 $audioThreshold       = 0.005
+$audioGraceMinutes    = 5      # Minutos de gracia tras el ultimo audio detectado
+$audioGraceSeconds    = $audioGraceMinutes * 60
 $logFile              = "$PSScriptRoot\autosuspend.log"
 
 # --- LOGGING ---
@@ -169,7 +171,10 @@ function Get-AudioVolume {
 }
 
 # --- INICIO ---
-Write-Log "Servicio AutoSuspend iniciado. Limite: $idleLimitMinutes min. Intervalo: $checkIntervalSeconds seg."
+Write-Log "Servicio AutoSuspend iniciado. Limite inactividad: $idleLimitMinutes min. Gracia de audio: $audioGraceMinutes min. Intervalo: $checkIntervalSeconds seg."
+
+# Ultima vez que se detecto audio (null = nunca)
+$lastAudioTime = $null
 
 $testVol = Get-AudioVolume
 Write-Log "Prueba de audio al inicio: $testVol"
@@ -180,15 +185,31 @@ while ($true) {
     if ($secondsIdle -ge $idleLimitSeconds) {
         $currentVolume = Get-AudioVolume
 
-        if ($currentVolume -lt $audioThreshold) {
-            Write-Log "Inactividad de $secondsIdle seg y silencio (Vol: $currentVolume). Suspendiendo..."
-            [System.Windows.Forms.Application]::SetSuspendState(
-                [System.Windows.Forms.PowerState]::Suspend,
-                $true,
-                $false
-            )
+        # Si hay audio ahora, actualizar el temporizador de gracia
+        if ($currentVolume -ge $audioThreshold) {
+            $lastAudioTime = Get-Date
+            Write-Log "Inactivo $secondsIdle seg, hay audio (Vol: $([math]::Round($currentVolume,4))). Gracia reiniciada."
         } else {
-            Write-Log "Inactivo $secondsIdle seg, hay audio (Vol: $([math]::Round($currentVolume,4))). Manteniendo encendido."
+            # Sin audio ahora — verificar si aun estamos en periodo de gracia
+            $secondsSinceAudio = if ($null -eq $lastAudioTime) {
+                [int]::MaxValue  # Nunca hubo audio, no hay gracia
+            } else {
+                [int]((Get-Date) - $lastAudioTime).TotalSeconds
+            }
+
+            if ($secondsSinceAudio -lt $audioGraceSeconds) {
+                $remainingGrace = $audioGraceSeconds - $secondsSinceAudio
+                Write-Log "Inactivo $secondsIdle seg, sin audio pero en gracia. Faltan $remainingGrace seg para poder suspender."
+            } else {
+                Write-Log "Inactividad de $secondsIdle seg y silencio confirmado (gracia expirada). Suspendiendo..."
+                [System.Windows.Forms.Application]::SetSuspendState(
+                    [System.Windows.Forms.PowerState]::Suspend,
+                    $true,
+                    $false
+                )
+                # Resetear gracia al volver de suspension
+                $lastAudioTime = $null
+            }
         }
     } else {
         Write-Log "Sistema activo. Inactivo: $secondsIdle seg / $idleLimitSeconds seg requeridos."
