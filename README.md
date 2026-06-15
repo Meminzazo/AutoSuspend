@@ -9,24 +9,28 @@ Script de PowerShell que suspende automáticamente el PC tras un periodo de inac
 Cada minuto el script verifica dos condiciones:
 
 1. **Inactividad del usuario** — usa la API nativa de Windows (`GetLastInputInfo`) para medir cuántos segundos han pasado desde la última interacción con teclado o ratón.
-2. **Ausencia de audio** — usa `MMDeviceEnumerator` para leer el nivel de volumen pico del dispositivo de salida de audio en tiempo real.
+2. **Ausencia de audio** — usa la Core Audio API de Windows via P/Invoke para leer el nivel de volumen pico del dispositivo de salida en tiempo real.
 
-Si ambas condiciones se cumplen (inactividad ≥ límite configurado **y** volumen < 0.005), el sistema se suspende.
+Para evitar suspensiones falsas durante silencios cortos (pausas en una llamada de Discord, cambio de canción, etc.), el script implementa un **periodo de gracia de audio**: si se detecta audio, se guarda la hora. Aunque el siguiente check no detecte audio, el script esperará 5 minutos desde la última detección antes de considerar que realmente hay silencio. Cualquier nueva detección de audio reinicia el contador de gracia desde cero.
 
 ```
-┌─────────────────────────────────────────┐
-│  Cada 60 segundos                       │
-│                                         │
-│  ¿Inactivo >= 25 min?                    │
-│       │                                 │
-│      SÍ ──► ¿Hay audio?                 │
-│       │          │                      │
-│       │         NO ──► 💤 Suspender     │
-│       │          │                      │
-│       │         SÍ ──► ⏳ Esperar       │
-│       │                                 │
-│      NO ──► ⏳ Esperar                  │
-└─────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│  Cada 60 segundos                                │
+│                                                  │
+│  ¿Inactivo >= 35 min?                            │
+│       │                                          │
+│      SÍ ──► ¿Hay audio?                          │
+│       │          │                               │
+│       │         SÍ ──► 🔄 Reiniciar gracia       │
+│       │          │                               │
+│       │         NO ──► ¿Gracia expirada (5 min)? │
+│       │                     │                    │
+│       │                    SÍ ──► 💤 Suspender   │
+│       │                     │                    │
+│       │                    NO ──► ⏳ Esperar     │
+│       │                                          │
+│      NO ──► ⏳ Esperar                           │
+└──────────────────────────────────────────────────┘
 ```
 
 ---
@@ -52,11 +56,7 @@ Si ambas condiciones se cumplen (inactividad ≥ límite configurado **y** volum
 
 1. Descarga ambos archivos en la misma carpeta.
 2. Click derecho en `Instalar-AutoSuspend.ps1` → **Ejecutar con PowerShell como administrador**.
-   2.1. En caso de que no aparezca la opcion de **Ejecutar con PoweShell como administrador"" y/o mande error:
-         Abrir powershell como adminstrador y ejecutar los siguientes comandos:
-         cd "direccion de los scripts" (ejemplo: cd D:\Documentos\Scripts)
-         powershell -ExecutionPolicy Bypass -File .\Instalar-AutoSuspend.ps1   
-4. Listo. El instalador configura la tarea y se elimina automáticamente.
+3. Listo. El instalador configura la tarea y se elimina automáticamente.
 
 El script se ejecutará de forma automática:
 - Al iniciar sesión en Windows.
@@ -69,10 +69,19 @@ El script se ejecutará de forma automática:
 Abre `AutoSuspend.ps1` y edita las variables al inicio del archivo:
 
 ```powershell
-$idleLimitMinutes     = 25      # Minutos de inactividad antes de suspender
+$idleLimitMinutes     = 35     # Minutos de inactividad antes de suspender
 $checkIntervalSeconds = 60     # Frecuencia de revisión en segundos
 $audioThreshold       = 0.005  # Nivel mínimo de volumen para considerar que hay audio
+$audioGraceMinutes    = 5      # Minutos de gracia tras el último audio detectado
 ```
+
+### Sobre la gracia de audio
+
+`$audioGraceMinutes` controla cuánto tiempo espera el script tras detectar audio por última vez antes de atreverse a suspender. Útil para evitar suspensiones durante silencios normales en llamadas de voz o entre canciones.
+
+- Si tus llamadas tienen silencios largos, sube este valor (ej. `10`).
+- Si quieres que el PC suspenda más rápido tras cerrar el audio, bájalo (ej. `2`).
+- Cualquier detección de audio reinicia el contador desde cero, sin importar en qué punto de la gracia estés.
 
 ---
 
@@ -81,10 +90,12 @@ $audioThreshold       = 0.005  # Nivel mínimo de volumen para considerar que ha
 El script genera un archivo `autosuspend.log` en la misma carpeta con el historial de eventos:
 
 ```
-[2026-05-12 00:27:55][INFO] Servicio AutoSuspend iniciado. Límite: 2 min.
-[2026-05-12 00:28:55][INFO] Sistema activo. Tiempo inactivo: 45 seg / 120 seg requeridos.
-[2026-05-12 00:30:55][INFO] Inactivo por 165 seg, pero hay audio (Vol: 0.3421). Manteniendo encendido.
-[2026-05-12 00:31:55][INFO] Inactividad de 225 seg y silencio total. Suspendiendo...
+[2026-05-24 21:00:00][INFO] Servicio AutoSuspend iniciado. Limite inactividad: 2 min. Gracia de audio: 5 min. Intervalo: 60 seg.
+[2026-05-24 21:00:00][INFO] Prueba de audio al inicio: 0.1823
+[2026-05-24 21:04:00][INFO] Inactivo 130 seg, hay audio (Vol: 0.3421). Gracia reiniciada.
+[2026-05-24 21:06:00][INFO] Inactivo 250 seg, sin audio pero en gracia. Faltan 299 seg para poder suspender.
+[2026-05-24 21:08:00][INFO] Inactivo 370 seg, hay audio (Vol: 0.1205). Gracia reiniciada.
+[2026-05-24 21:14:00][INFO] Inactividad de 730 seg y silencio confirmado (gracia expirada). Suspendiendo...
 ```
 
 ---
@@ -101,3 +112,7 @@ Unregister-ScheduledTask -TaskName "AutoSuspend" -Confirm:$false
 Luego elimina manualmente la carpeta con los scripts.
 
 ---
+
+## Licencia
+
+MIT — consulta el archivo [LICENSE](LICENSE) para más detalles.
