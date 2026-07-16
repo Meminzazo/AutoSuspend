@@ -1,37 +1,40 @@
 # 🖥️ AutoSuspend
 
-Script de PowerShell que suspende automáticamente el PC tras un periodo de inactividad, **siempre que no haya audio reproduciéndose**.
+Script de PowerShell que suspende automáticamente el PC tras un periodo de inactividad, siempre que no haya actividad activa detectada: audio, llamada de Discord o descarga en un launcher de juegos.
 
 ---
 
 ## ¿Cómo funciona?
 
-Cada minuto el script verifica dos condiciones:
-
-1. **Inactividad del usuario** — usa la API nativa de Windows (`GetLastInputInfo`) para medir cuántos segundos han pasado desde la última interacción con teclado o ratón.
-2. **Ausencia de audio** — usa la Core Audio API de Windows via P/Invoke para leer el nivel de volumen pico del dispositivo de salida en tiempo real.
-
-Para evitar suspensiones falsas durante silencios cortos (pausas en una llamada de Discord, cambio de canción, etc.), el script implementa un **periodo de gracia de audio**: si se detecta audio, se guarda la hora. Aunque el siguiente check no detecte audio, el script esperará 5 minutos desde la última detección antes de considerar que realmente hay silencio. Cualquier nueva detección de audio reinicia el contador de gracia desde cero.
+Cada minuto el script verifica que el usuario esté inactivo y luego comprueba tres fuentes de actividad. Cualquiera de ellas reinicia un **periodo de gracia compartido** de 5 minutos: mientras la gracia no expire, el PC no se suspende.
 
 ```
-┌──────────────────────────────────────────────────┐
-│  Cada 60 segundos                                │
-│                                                  │
-│  ¿Inactivo >= 35 min?                            │
-│       │                                          │
-│      SÍ ──► ¿Hay audio?                          │
-│       │          │                               │
-│       │         SÍ ──► 🔄 Reiniciar gracia       │
-│       │          │                               │
-│       │         NO ──► ¿Gracia expirada (5 min)? │
-│       │                     │                    │
-│       │                    SÍ ──► 💤 Suspender   │
-│       │                     │                    │
-│       │                    NO ──► ⏳ Esperar     │
-│       │                                          │
-│      NO ──► ⏳ Esperar                           │
-└──────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│  Cada 60 segundos                                      │
+│                                                        │
+│  ¿Inactivo >= 2 min?                                   │
+│       │                                                │
+│      SÍ ──► ¿Audio / Discord en llamada / Descarga?   │
+│       │                    │                           │
+│       │                   SÍ ──► 🔄 Reiniciar gracia  │
+│       │                    │                           │
+│       │                   NO ──► ¿Gracia expirada?    │
+│       │                               │               │
+│       │                              SÍ ──► 💤 Suspender
+│       │                               │               │
+│       │                              NO ──► ⏳ Esperar │
+│       │                                                │
+│      NO ──► ⏳ Esperar                                 │
+└────────────────────────────────────────────────────────┘
 ```
+
+### Fuentes de actividad detectadas
+
+**Audio** — Lee el nivel de volumen pico del dispositivo de salida predeterminado via Core Audio API. Cualquier sonido por encima del umbral configurable reinicia la gracia.
+
+**Llamada de Discord** *(experimental)* — Detecta conexiones UDP activas de `discord.exe` en el rango de puertos 50000-65535, que Discord usa exclusivamente para voz y video. Si Discord está abierto pero no en llamada, no activa la gracia.
+
+**Descarga en launchers** *(experimental)* — Mide el tráfico de red recibido en intervalos de 2 segundos. Si supera el umbral configurado, se considera que hay una descarga activa. Launchers soportados: Steam, Epic Games, GOG Galaxy, Battle.net, EA App y Origin.
 
 ---
 
@@ -69,33 +72,46 @@ El script se ejecutará de forma automática:
 Abre `AutoSuspend.ps1` y edita las variables al inicio del archivo:
 
 ```powershell
-$idleLimitMinutes     = 35     # Minutos de inactividad antes de suspender
+$idleLimitMinutes     = 35      # Minutos de inactividad antes de evaluar suspensión
 $checkIntervalSeconds = 60     # Frecuencia de revisión en segundos
 $audioThreshold       = 0.005  # Nivel mínimo de volumen para considerar que hay audio
-$audioGraceMinutes    = 5      # Minutos de gracia tras el último audio detectado
+$audioGraceMinutes    = 5      # Minutos de gracia compartidos por las tres fuentes
+$networkThresholdMBps = 3      # MB/s mínimos para considerar descarga activa (1 MB/s = 8 Mbps)
 ```
 
-### Sobre la gracia de audio
+### Sobre la gracia de actividad
 
-`$audioGraceMinutes` controla cuánto tiempo espera el script tras detectar audio por última vez antes de atreverse a suspender. Útil para evitar suspensiones durante silencios normales en llamadas de voz o entre canciones.
+`$audioGraceMinutes` es un temporizador compartido. Cualquiera de las tres fuentes (audio, Discord, descarga) puede reiniciarlo. El PC no se suspenderá mientras haya pasado menos de ese tiempo desde la última actividad detectada, sin importar cuál fue.
 
 - Si tus llamadas tienen silencios largos, sube este valor (ej. `10`).
 - Si quieres que el PC suspenda más rápido tras cerrar el audio, bájalo (ej. `2`).
-- Cualquier detección de audio reinicia el contador desde cero, sin importar en qué punto de la gracia estés.
+
+### Sobre el umbral de red
+
+`$networkThresholdMBps` se expresa en **MB/s** (megabytes por segundo). Referencia rápida:
+
+| `$networkThresholdMBps` | Equivalente |
+|---|---|
+| `1` | 8 Mbps |
+| `5` | 40 Mbps |
+| `10` | 80 Mbps |
+| `12.5` | 100 Mbps |
+
+Se recomienda dejarlo en `3` para que detecte también descargas en segundo plano o con ancho de banda limitado.
 
 ---
 
 ## Registro (log)
 
-El script genera un archivo `autosuspend.log` en la misma carpeta con el historial de eventos:
+El script genera `autosuspend.log` en la misma carpeta. El log indica qué fuente reinició la gracia en cada ciclo:
 
 ```
-[2026-05-24 21:00:00][INFO] Servicio AutoSuspend iniciado. Limite inactividad: 2 min. Gracia de audio: 5 min. Intervalo: 60 seg.
-[2026-05-24 21:00:00][INFO] Prueba de audio al inicio: 0.1823
-[2026-05-24 21:04:00][INFO] Inactivo 130 seg, hay audio (Vol: 0.3421). Gracia reiniciada.
-[2026-05-24 21:06:00][INFO] Inactivo 250 seg, sin audio pero en gracia. Faltan 299 seg para poder suspender.
-[2026-05-24 21:08:00][INFO] Inactivo 370 seg, hay audio (Vol: 0.1205). Gracia reiniciada.
-[2026-05-24 21:14:00][INFO] Inactividad de 730 seg y silencio confirmado (gracia expirada). Suspendiendo...
+[2026-05-24 21:00:00][INFO] Servicio AutoSuspend iniciado. Limite: 2 min | Gracia: 5 min | Red: >1 MB/s | Intervalo: 60 seg.
+[2026-05-24 21:04:00][INFO] Inactivo 130 seg | Actividad detectada: audio (Vol: 0.3421). Gracia reiniciada.
+[2026-05-24 21:06:00][INFO] Inactivo 250 seg | Sin actividad, en gracia. Faltan 240 seg para suspender.
+[2026-05-24 21:08:00][INFO] Inactivo 370 seg | Actividad detectada: llamada de Discord activa. Gracia reiniciada.
+[2026-05-24 21:10:00][INFO] Inactivo 490 seg | Actividad detectada: descarga activa en launcher (45.3 MB/s). Gracia reiniciada.
+[2026-05-24 21:20:00][INFO] Inactivo 1090 seg | Sin actividad y gracia expirada. Suspendiendo...
 ```
 
 ---
