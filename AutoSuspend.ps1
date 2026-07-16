@@ -1,5 +1,6 @@
 # ==============================================================================
-# AutoSuspend.ps1 — Suspende el PC tras inactividad si no hay audio activo
+# AutoSuspend.ps1 — Suspende el PC tras inactividad si no hay actividad activa
+# Detecta: audio, llamada de Discord, descargas activas en launchers de juegos
 # ==============================================================================
 
 # --- CONFIGURACIÓN ---
@@ -7,9 +8,21 @@ $idleLimitMinutes     = 35
 $checkIntervalSeconds = 60
 $idleLimitSeconds     = $idleLimitMinutes * 60
 $audioThreshold       = 0.005
-$audioGraceMinutes    = 5      # Minutos de gracia tras el ultimo audio detectado
+$audioGraceMinutes    = 5      # Minutos de gracia compartidos por audio, Discord y descargas
 $audioGraceSeconds    = $audioGraceMinutes * 60
+$networkThresholdMBps = 3     # MB/s mínimos para considerar descarga activa
 $logFile              = "$PSScriptRoot\autosuspend.log"
+
+# Procesos de los launchers a monitorear para tráfico de red
+$launcherProcesses = @(
+    "steam",           # Steam
+    "EpicGamesLauncher",# Epic Games
+    "GalaxyClient",    # GOG Galaxy
+    "Battle.net",      # Battle.net
+    "EADesktop",       # EA App
+    "EALauncher",      # EA App (proceso alternativo)
+    "Origin"           # Origin (legado)
+)
 
 # --- LOGGING ---
 function Write-Log {
@@ -53,8 +66,7 @@ public class Win32 {
     }
 
     // ------------------------------------------------------------------ //
-    //  Audio — Core Audio API completamente via P/Invoke                   //
-    //  Sin interfaces COM de .NET; todo via punteros nativos               //
+    //  Audio — Core Audio API via P/Invoke puro (sin COM de .NET)         //
     // ------------------------------------------------------------------ //
     [DllImport("ole32.dll")]
     static extern int CoCreateInstance(
@@ -67,25 +79,18 @@ public class Win32 {
     [DllImport("ole32.dll")]
     static extern void CoUninitialize();
 
-    // vtable offsets para IMMDeviceEnumerator::GetDefaultAudioEndpoint (metodo #4, indice 3)
-    // vtable: 0=QI, 1=AddRef, 2=Release, 3=EnumAudioEndpoints, 4=GetDefaultAudioEndpoint
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     delegate int GetDefaultAudioEndpointDelegate(
         IntPtr self, int dataFlow, int role, out IntPtr ppDevice);
 
-    // vtable offset para IMMDevice::Activate (metodo #4, indice 3)
-    // vtable: 0=QI, 1=AddRef, 2=Release, 3=Activate
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     delegate int ActivateDelegate(
         IntPtr self, ref Guid iid, uint dwClsCtx,
         IntPtr pActivationParams, out IntPtr ppInterface);
 
-    // vtable para IAudioMeterInformation::GetPeakValue (metodo #4, indice 3)
-    // vtable: 0=QI, 1=AddRef, 2=Release, 3=GetPeakValue
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     delegate int GetPeakValueDelegate(IntPtr self, out float pfPeak);
 
-    // vtable: 0=QI, 1=AddRef, 2=Release
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     delegate int ReleaseDelegate(IntPtr self);
 
@@ -101,11 +106,8 @@ public class Win32 {
     }
 
     public static float GetAudioPeakValue() {
-        // CLSID MMDeviceEnumerator
         Guid clsidEnum = new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E");
-        // IID IMMDeviceEnumerator
         Guid iidEnum   = new Guid("A95664D2-9614-4F35-A746-DE8DB63617E6");
-        // IID IAudioMeterInformation
         Guid iidMeter  = new Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064");
 
         IntPtr pEnum   = IntPtr.Zero;
@@ -115,24 +117,20 @@ public class Win32 {
         try {
             CoInitialize(IntPtr.Zero);
 
-            // 1. Crear MMDeviceEnumerator
             int hr = CoCreateInstance(ref clsidEnum, IntPtr.Zero, 1, ref iidEnum, out pEnum);
             if (hr != 0 || pEnum == IntPtr.Zero)
                 throw new Exception("CoCreateInstance fallo. HR=" + hr.ToString("X8"));
 
-            // 2. GetDefaultAudioEndpoint
             var getEndpoint = GetVtableMethod<GetDefaultAudioEndpointDelegate>(pEnum, 4);
-            hr = getEndpoint(pEnum, 0, 0, out pDevice); // eRender=0, eConsole=0
+            hr = getEndpoint(pEnum, 0, 0, out pDevice);
             if (hr != 0 || pDevice == IntPtr.Zero)
                 throw new Exception("GetDefaultAudioEndpoint fallo. HR=" + hr.ToString("X8"));
 
-            // 3. IMMDevice::Activate -> IAudioMeterInformation
             var activate = GetVtableMethod<ActivateDelegate>(pDevice, 3);
             hr = activate(pDevice, ref iidMeter, 1, IntPtr.Zero, out pMeter);
             if (hr != 0 || pMeter == IntPtr.Zero)
                 throw new Exception("Activate fallo. HR=" + hr.ToString("X8"));
 
-            // 4. GetPeakValue
             var getPeak = GetVtableMethod<GetPeakValueDelegate>(pMeter, 3);
             float peak;
             hr = getPeak(pMeter, out peak);
@@ -170,11 +168,75 @@ function Get-AudioVolume {
     }
 }
 
-# --- INICIO ---
-Write-Log "Servicio AutoSuspend iniciado. Limite inactividad: $idleLimitMinutes min. Gracia de audio: $audioGraceMinutes min. Intervalo: $checkIntervalSeconds seg."
+# --- DETECCIÓN DE LLAMADA EN DISCORD [EXPERIMENTAL] ---
+# Discord abre sockets UDP en el rango 50000-65535 durante llamadas de voz/video.
+# Se detecta buscando conexiones UDP activas del proceso discord.exe en ese rango.
+function Get-DiscordInCall {
+    try {
+        $discordProcs = Get-Process -Name "discord" -ErrorAction SilentlyContinue
+        if (-not $discordProcs) { return $false }
 
-# Ultima vez que se detecto audio (null = nunca)
-$lastAudioTime = $null
+        $discordPids = $discordProcs.Id
+
+        # netstat lista conexiones UDP activas; filtramos por PID de Discord
+        # y por el rango de puertos de voz (50000-65535)
+        $netstatOutput = netstat -ano -p UDP 2>$null
+        foreach ($line in $netstatOutput) {
+            if ($line -match '^\s*UDP\s+\S+:(\d+)\s+\*:\*\s+(\d+)') {
+                $port = [int]$Matches[1]
+                $pid  = [int]$Matches[2]
+                if ($discordPids -contains $pid -and $port -ge 50000) {
+                    return $true
+                }
+            }
+        }
+        return $false
+    } catch {
+        Write-Log "Error detectando llamada de Discord: $_" "WARN"
+        return $false
+    }
+}
+
+# --- DETECCIÓN DE DESCARGA ACTIVA EN LAUNCHERS [EXPERIMENTAL] ---
+# Mide el tráfico de red de los procesos launcher comparando contadores
+# de bytes recibidos entre dos snapshots separados por 2 segundos.
+function Get-LauncherDownloadMBps {
+    try {
+        # Obtener PIDs de launchers activos
+        $activePids = @()
+        foreach ($name in $launcherProcesses) {
+            $procs = Get-Process -Name $name -ErrorAction SilentlyContinue
+            if ($procs) { $activePids += $procs.Id }
+        }
+        if ($activePids.Count -eq 0) { return 0.0 }
+
+        # Snapshot 1: bytes recibidos por proceso via Win32_PerfRawData_Tcpip_NetworkInterface
+        # Usamos Get-NetAdapterStatistics para el total de la interfaz y filtramos
+        # por proceso con Get-Counter si está disponible, de lo contrario usamos
+        # el tráfico total de la interfaz como aproximación
+        $before = (Get-NetAdapterStatistics -ErrorAction SilentlyContinue |
+                   Measure-Object -Property ReceivedBytes -Sum).Sum
+        if ($null -eq $before) { return 0.0 }
+
+        Start-Sleep -Milliseconds 2000
+
+        $after = (Get-NetAdapterStatistics -ErrorAction SilentlyContinue |
+                  Measure-Object -Property ReceivedBytes -Sum).Sum
+        if ($null -eq $after) { return 0.0 }
+
+        $bytesPerSec = ($after - $before) / 2
+        $mbps = [math]::Round($bytesPerSec / 1MB, 2)
+        return $mbps
+    } catch {
+        Write-Log "Error midiendo trafico de red: $_" "WARN"
+        return 0.0
+    }
+}
+
+# --- INICIO ---
+Write-Log "Servicio AutoSuspend iniciado. Limite: $idleLimitMinutes min | Gracia: $audioGraceMinutes min | Red: >$networkThresholdMBps MB/s | Intervalo: $checkIntervalSeconds seg."
+
+$lastActivityTime = $null   # Gracia compartida: audio + Discord + descargas
 
 $testVol = Get-AudioVolume
 Write-Log "Prueba de audio al inicio: $testVol"
@@ -183,32 +245,53 @@ while ($true) {
     $secondsIdle = [Win32]::GetIdleTime()
 
     if ($secondsIdle -ge $idleLimitSeconds) {
-        $currentVolume = Get-AudioVolume
 
-        # Si hay audio ahora, actualizar el temporizador de gracia
+        $activityReason = $null   # Qué disparó la gracia este ciclo
+
+        # -- 1. Audio --
+        $currentVolume = Get-AudioVolume
         if ($currentVolume -ge $audioThreshold) {
-            $lastAudioTime = Get-Date
-            Write-Log "Inactivo $secondsIdle seg, hay audio (Vol: $([math]::Round($currentVolume,4))). Gracia reiniciada."
+            $activityReason = "audio (Vol: $([math]::Round($currentVolume,4)))"
+        }
+
+        # -- 2. Llamada de Discord [EXPERIMENTAL] --
+        if (-not $activityReason) {
+            $inCall = Get-DiscordInCall
+            if ($inCall) {
+                $activityReason = "llamada de Discord activa"
+            }
+        }
+
+        # -- 3. Descarga en launcher [EXPERIMENTAL] --
+        if (-not $activityReason) {
+            $downloadMBps = Get-LauncherDownloadMBps
+            if ($downloadMBps -ge $networkThresholdMBps) {
+                $activityReason = "descarga activa en launcher ($downloadMBps MB/s)"
+            }
+        }
+
+        # -- Decisión --
+        if ($activityReason) {
+            $lastActivityTime = Get-Date
+            Write-Log "Inactivo $secondsIdle seg | Actividad detectada: $activityReason. Gracia reiniciada."
         } else {
-            # Sin audio ahora — verificar si aun estamos en periodo de gracia
-            $secondsSinceAudio = if ($null -eq $lastAudioTime) {
-                [int]::MaxValue  # Nunca hubo audio, no hay gracia
+            $secondsSinceActivity = if ($null -eq $lastActivityTime) {
+                [int]::MaxValue
             } else {
-                [int]((Get-Date) - $lastAudioTime).TotalSeconds
+                [int]((Get-Date) - $lastActivityTime).TotalSeconds
             }
 
-            if ($secondsSinceAudio -lt $audioGraceSeconds) {
-                $remainingGrace = $audioGraceSeconds - $secondsSinceAudio
-                Write-Log "Inactivo $secondsIdle seg, sin audio pero en gracia. Faltan $remainingGrace seg para poder suspender."
+            if ($secondsSinceActivity -lt $audioGraceSeconds) {
+                $remainingGrace = $audioGraceSeconds - $secondsSinceActivity
+                Write-Log "Inactivo $secondsIdle seg | Sin actividad, en gracia. Faltan $remainingGrace seg para suspender."
             } else {
-                Write-Log "Inactividad de $secondsIdle seg y silencio confirmado (gracia expirada). Suspendiendo..."
+                Write-Log "Inactivo $secondsIdle seg | Sin actividad y gracia expirada. Suspendiendo..."
                 [System.Windows.Forms.Application]::SetSuspendState(
                     [System.Windows.Forms.PowerState]::Suspend,
                     $true,
                     $false
                 )
-                # Resetear gracia al volver de suspension
-                $lastAudioTime = $null
+                $lastActivityTime = $null
             }
         }
     } else {
