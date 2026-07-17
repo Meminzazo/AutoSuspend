@@ -4,13 +4,13 @@
 # ==============================================================================
 
 # --- CONFIGURACIÓN ---
-$idleLimitMinutes     = 2
+$idleLimitMinutes     = 35
 $checkIntervalSeconds = 60
 $idleLimitSeconds     = $idleLimitMinutes * 60
 $audioThreshold       = 0.005
 $audioGraceMinutes    = 5      # Minutos de gracia compartidos por audio, Discord y descargas
 $audioGraceSeconds    = $audioGraceMinutes * 60
-$networkThresholdMBps = 10     # MB/s mínimos para considerar descarga activa
+$networkThresholdMBps = 2     # MB/s mínimos para considerar descarga activa
 $logFile              = "$PSScriptRoot\autosuspend.log"
 
 # Procesos de los launchers a monitorear para tráfico de red
