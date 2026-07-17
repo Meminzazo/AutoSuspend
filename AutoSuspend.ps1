@@ -4,13 +4,13 @@
 # ==============================================================================
 
 # --- CONFIGURACIÓN ---
-$idleLimitMinutes     = 35
+$idleLimitMinutes     = 2
 $checkIntervalSeconds = 60
 $idleLimitSeconds     = $idleLimitMinutes * 60
 $audioThreshold       = 0.005
 $audioGraceMinutes    = 5      # Minutos de gracia compartidos por audio, Discord y descargas
 $audioGraceSeconds    = $audioGraceMinutes * 60
-$networkThresholdMBps = 3     # MB/s mínimos para considerar descarga activa
+$networkThresholdMBps = 10     # MB/s mínimos para considerar descarga activa
 $logFile              = "$PSScriptRoot\autosuspend.log"
 
 # Procesos de los launchers a monitorear para tráfico de red
@@ -183,9 +183,9 @@ function Get-DiscordInCall {
         $netstatOutput = netstat -ano -p UDP 2>$null
         foreach ($line in $netstatOutput) {
             if ($line -match '^\s*UDP\s+\S+:(\d+)\s+\*:\*\s+(\d+)') {
-                $port = [int]$Matches[1]
-                $pid  = [int]$Matches[2]
-                if ($discordPids -contains $pid -and $port -ge 50000) {
+                $port   = [int]$Matches[1]
+                $procId = [int]$Matches[2]
+                if ($discordPids -contains $procId -and $port -ge 50000) {
                     return $true
                 }
             }
