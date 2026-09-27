@@ -77,6 +77,7 @@ $checkIntervalSeconds = 60     # Frecuencia de revisión en segundos
 $audioThreshold       = 0.005  # Nivel mínimo de volumen para considerar que hay audio
 $audioGraceMinutes    = 5      # Minutos de gracia compartidos por las tres fuentes
 $networkThresholdMBps = 3      # MB/s mínimos para considerar descarga activa (1 MB/s = 8 Mbps)
+$maxLogSizeBytes      = 2MB    # Tamaño en MB del archivo .log
 ```
 
 ### Sobre la gracia de actividad
@@ -103,7 +104,7 @@ Se recomienda dejarlo en `3` para que detecte también descargas en segundo plan
 
 ## Registro (log)
 
-El script genera `autosuspend.log` en la misma carpeta. El log indica qué fuente reinició la gracia en cada ciclo:
+El script genera `autosuspend.log` en la misma carpeta (limitado a 2MB{configurable} de espacio). El log indica qué fuente reinició la gracia en cada ciclo:
 
 ```
 [2026-05-24 21:00:00][INFO] Servicio AutoSuspend iniciado. Limite: 2 min | Gracia: 5 min | Red: >1 MB/s | Intervalo: 60 seg.
