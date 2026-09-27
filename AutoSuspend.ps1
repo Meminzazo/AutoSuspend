@@ -10,8 +10,9 @@ $idleLimitSeconds     = $idleLimitMinutes * 60
 $audioThreshold       = 0.005
 $audioGraceMinutes    = 5      # Minutos de gracia compartidos por audio, Discord y descargas
 $audioGraceSeconds    = $audioGraceMinutes * 60
-$networkThresholdMBps = 2     # MB/s mínimos para considerar descarga activa
+$networkThresholdMBps = 1     # MB/s mínimos para considerar descarga activa
 $logFile              = "$PSScriptRoot\autosuspend.log"
+$maxLogSizeBytes      = 2MB
 
 # Procesos de los launchers a monitorear para tráfico de red
 $launcherProcesses = @(
@@ -27,9 +28,26 @@ $launcherProcesses = @(
 # --- LOGGING ---
 function Write-Log {
     param([string]$Message, [string]$Level = "INFO")
+
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $line = "[$timestamp][$Level] $Message"
+
     Write-Host $line
+
+    # Si el log llegó al límite, eliminarlo y empezar uno nuevo.
+    if (Test-Path $logFile) {
+        try {
+            $logSize = (Get-Item $logFile -ErrorAction Stop).Length
+
+            if ($logSize -ge $maxLogSizeBytes) {
+                Remove-Item -Path $logFile -Force -ErrorAction Stop
+            }
+        }
+        catch {
+            Write-Host "[WARN] No se pudo rotar el log: $_"
+        }
+    }
+
     Add-Content -Path $logFile -Value $line -Encoding UTF8
 }
 
