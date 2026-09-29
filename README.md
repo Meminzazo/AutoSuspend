@@ -61,6 +61,21 @@ Cada minuto el script verifica que el usuario esté inactivo y luego comprueba t
 2. Click derecho en `Instalar-AutoSuspend.ps1` → **Ejecutar con PowerShell como administrador**.
 3. Listo. El instalador configura la tarea y se elimina automáticamente.
 
+
+**Si no aparece la opción «Ejecutar con PowerShell como administrador»:**
+
+1. Abre el menú **Inicio (Start)** y busca **PowerShell** o **Windows PowerShell**.
+2. Haz clic derecho en el resultado y selecciona **Ejecutar como administrador (Run as administrator)**. También puedes seleccionar la opción desde el panel derecho del menú Inicio.
+3. En la ventana de PowerShell, ejecuta el instalador usando su ruta completa. Por ejemplo:
+
+   ```powershell
+   & "$env:USERPROFILE\Downloads\AutoSuspend\Instalar-AutoSuspend.ps1"
+   ```
+
+   Ajusta la ruta si guardaste los archivos en otra carpeta. Para AutoSuspend, sustituye el nombre del instalador por `Instalar-AutoSuspend.ps1`.
+4. Si aparece el aviso de Control de cuentas de usuario (UAC), confirma con **Sí (Yes)**.
+
+
 El script se ejecutará de forma automática:
 - Al iniciar sesión en Windows.
 - Al volver de suspensión (con o sin contraseña de bloqueo configurada).
