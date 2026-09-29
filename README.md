@@ -6,13 +6,13 @@ Script de PowerShell que suspende automáticamente el PC tras un periodo de inac
 
 ## ¿Cómo funciona?
 
-Cada minuto el script verifica que el usuario esté inactivo y luego comprueba tres fuentes de actividad. Cualquiera de ellas reinicia un **periodo de gracia compartido** de 5 minutos: mientras la gracia no expire, el PC no se suspende.
+Cada 60 segundos el script revisa el tiempo de inactividad. Al alcanzar **35 minutos**, comprueba tres fuentes de actividad. Cualquiera de ellas reinicia un **periodo de gracia compartido** de 5 minutos: mientras la gracia no expire, el PC no se suspende.
 
 ```
 ┌────────────────────────────────────────────────────────┐
 │  Cada 60 segundos                                      │
 │                                                        │
-│  ¿Inactivo >= 2 min?                                   │
+│  ¿Inactivo >= 35 min?                                   │
 │       │                                                │
 │      SÍ ──► ¿Audio / Discord en llamada / Descarga?   │
 │       │                    │                           │
@@ -32,9 +32,9 @@ Cada minuto el script verifica que el usuario esté inactivo y luego comprueba t
 
 **Audio** — Lee el nivel de volumen pico del dispositivo de salida predeterminado via Core Audio API. Cualquier sonido por encima del umbral configurable reinicia la gracia.
 
-**Llamada de Discord** *(experimental)* — Detecta conexiones UDP activas de `discord.exe` en el rango de puertos 50000-65535, que Discord usa exclusivamente para voz y video. Si Discord está abierto pero no en llamada, no activa la gracia.
+**Actividad UDP de Discord** *(experimental)* — Busca en la salida de `netstat` entradas UDP asociadas al proceso `discord.exe` cuyo puerto local sea igual o superior a `50000`. Es un indicador indirecto de actividad de voz/video, no una confirmación fiable de que haya una llamada activa; puede haber falsos positivos o negativos.
 
-**Descarga en launchers** *(experimental)* — Mide el tráfico de red recibido en intervalos de 2 segundos. Si supera el umbral configurado, se considera que hay una descarga activa. Launchers soportados: Steam, Epic Games, GOG Galaxy, Battle.net, EA App y Origin.
+**Tráfico de red con launchers abiertos** *(experimental)* — Si detecta abierto al menos uno de los launchers compatibles, mide el total de bytes recibidos por los adaptadores de red durante un intervalo de 2 segundos. Si la tasa supera el umbral configurado, se considera actividad. La medición **no está asociada al proceso del launcher**: también puede contar tráfico de Windows u otras aplicaciones. Launchers comprobados: Steam, Epic Games, GOG Galaxy, Battle.net, EA App y Origin.
 
 ---
 
@@ -123,21 +123,21 @@ $maxLogSizeBytes      = 2MB    # Tamaño en MB del archivo .log
 | `10` | 80 Mbps |
 | `12.5` | 100 Mbps |
 
-Se recomienda dejarlo en `3` para que detecte también descargas en segundo plano o con ancho de banda limitado.
+El valor predeterminado del script es `1` MB/s. Puedes aumentarlo para reducir detecciones causadas por tráfico de otras aplicaciones, o disminuirlo si quieres detectar transferencias más lentas. Como la medición es del tráfico total recibido, un umbral menor también puede aumentar los falsos positivos.
 
 ---
 
 ## Registro (log)
 
-El script genera `autosuspend.log` en la misma carpeta (limitado a 2MB{configurable} de espacio). El log indica qué fuente reinició la gracia en cada ciclo:
+El script genera `autosuspend.log` en la misma carpeta, con un tamaño máximo de 2 MB (configurable mediante `$maxLogSizeBytes`). Al alcanzar el límite, el archivo se elimina y se vuelve a crear; no se conserva un historial anterior. El log indica qué fuente reinició la gracia en cada ciclo:
 
 ```
-[2026-05-24 21:00:00][INFO] Servicio AutoSuspend iniciado. Limite: 2 min | Gracia: 5 min | Red: >1 MB/s | Intervalo: 60 seg.
-[2026-05-24 21:04:00][INFO] Inactivo 130 seg | Actividad detectada: audio (Vol: 0.3421). Gracia reiniciada.
-[2026-05-24 21:06:00][INFO] Inactivo 250 seg | Sin actividad, en gracia. Faltan 240 seg para suspender.
-[2026-05-24 21:08:00][INFO] Inactivo 370 seg | Actividad detectada: llamada de Discord activa. Gracia reiniciada.
-[2026-05-24 21:10:00][INFO] Inactivo 490 seg | Actividad detectada: descarga activa en launcher (45.3 MB/s). Gracia reiniciada.
-[2026-05-24 21:20:00][INFO] Inactivo 1090 seg | Sin actividad y gracia expirada. Suspendiendo...
+[2026-05-24 21:00:00][INFO] Servicio AutoSuspend iniciado. Limite: 35 min | Gracia: 5 min | Red: >1 MB/s | Intervalo: 60 seg.
+[2026-05-24 21:04:00][INFO] Inactivo 2100 seg | Actividad detectada: audio (Vol: 0.3421). Gracia reiniciada.
+[2026-05-24 21:06:00][INFO] Inactivo 2220 seg | Sin actividad, en gracia. Faltan 240 seg para suspender.
+[2026-05-24 21:08:00][INFO] Inactivo 2340 seg | Actividad detectada: actividad UDP de Discord. Gracia reiniciada.
+[2026-05-24 21:10:00][INFO] Inactivo 2460 seg | Actividad detectada: tráfico de red con launcher abierto (45.3 MB/s). Gracia reiniciada.
+[2026-05-24 21:20:00][INFO] Inactivo 3060 seg | Sin actividad y gracia expirada. Suspendiendo...
 ```
 
 ---
