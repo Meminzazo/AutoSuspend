@@ -221,36 +221,29 @@ function Get-DiscordInCall {
 function Get-LauncherDownloadMBps {
     try {
         # Obtener PIDs de launchers activos
-        $launcherActive = $false
+        $launcherPids = @()
         foreach ($name in $launcherProcesses) {
-            # [OPT] Only existence is needed; the collected PIDs were not used.
-            if (Get-Process -Name $name -ErrorAction SilentlyContinue) {
-                $launcherActive = $true
-                break
+            $procs = Get-Process -Name $name -ErrorAction SilentlyContinue
+            if ($procs) {
+                $launcherPids += $procs.Id
             }
         }
-        if (-not $launcherActive) { return 0.0 }
+        if ($launcherPids.Count -eq 0) { return 0.0 }
 
         # Snapshot 1: bytes recibidos por proceso via Win32_PerfRawData_Tcpip_NetworkInterface
         # Usamos Get-NetAdapterStatistics para el total de la interfaz y filtramos
         # por proceso con Get-Counter si está disponible, de lo contrario usamos
         # el tráfico total de la interfaz como aproximación
-        $before = 0L
-        foreach ($adapter in @(Get-NetAdapterStatistics -ErrorAction SilentlyContinue)) {
-            if ($null -ne $adapter.ReceivedBytes) {
-                $before += [int64]$adapter.ReceivedBytes
-            }
-        }
+        $before = @(Get-NetAdapterStatistics -ErrorAction SilentlyContinue) |
+            Measure-Object -Property ReceivedBytes -Sum |
+            Select-Object -ExpandProperty Sum
         if ($null -eq $before) { return 0.0 }
 
         Start-Sleep -Milliseconds 2000
 
-        $after = 0L
-        foreach ($adapter in @(Get-NetAdapterStatistics -ErrorAction SilentlyContinue)) {
-            if ($null -ne $adapter.ReceivedBytes) {
-                $after += [int64]$adapter.ReceivedBytes
-            }
-        }
+        $after = @(Get-NetAdapterStatistics -ErrorAction SilentlyContinue) |
+            Measure-Object -Property ReceivedBytes -Sum |
+            Select-Object -ExpandProperty Sum
         if ($null -eq $after) { return 0.0 }
 
         $bytesPerSec = ($after - $before) / 2
