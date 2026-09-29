@@ -35,6 +35,8 @@ function Write-Log {
     Write-Host $line
 
     # Si el log llegó al límite, eliminarlo y empezar uno nuevo.
+    # Diseño intencional: no se conservan logs antiguos (no hay .old)
+    # para no acumular archivos en la carpeta del script.
     if (Test-Path $logFile) {
         try {
             $logSize = (Get-Item $logFile -ErrorAction Stop).Length
@@ -80,7 +82,9 @@ public class Win32 {
         LASTINPUTINFO lastInputInfo = new LASTINPUTINFO();
         lastInputInfo.cbSize = (uint)Marshal.SizeOf(lastInputInfo);
         if (!GetLastInputInfo(ref lastInputInfo)) return 0;
-        return (uint)((GetTickCount64() - lastInputInfo.dwTime) / 1000);
+        // (uint) trunca el tick a 32 bits, igual que dwTime, para que la resta
+        // siga siendo correcta pasados 49,7 dias de uptime.
+        return (uint)(((uint)GetTickCount64() - lastInputInfo.dwTime) / 1000);
     }
 
     // ------------------------------------------------------------------ //
@@ -189,6 +193,8 @@ function Get-AudioVolume {
 # --- DETECCIÓN DE LLAMADA EN DISCORD [EXPERIMENTAL] ---
 # Discord abre sockets UDP en el rango 50000-65535 durante llamadas de voz/video.
 # Se detecta buscando conexiones UDP activas del proceso discord.exe en ese rango.
+# Validado en uso real: con Discord abierto pero sin llamada NO se reinicia la
+# gracia, así que no bloquea la suspensión.
 function Get-DiscordInCall {
     try {
         $discordProcs = Get-Process -Name "discord" -ErrorAction SilentlyContinue
@@ -218,6 +224,9 @@ function Get-DiscordInCall {
 # --- DETECCIÓN DE DESCARGA ACTIVA EN LAUNCHERS [EXPERIMENTAL] ---
 # Mide el tráfico de red de los procesos launcher comparando contadores
 # de bytes recibidos entre dos snapshots separados por 2 segundos.
+# Diseño intencional: mientras haya un launcher abierto, se mide el tráfico
+# total de red (no el de un proceso concreto). Cualquier transferencia por
+# encima de $networkThresholdMBps cuenta como descarga activa.
 function Get-LauncherDownloadMBps {
     try {
         # Obtener PIDs de launchers activos
