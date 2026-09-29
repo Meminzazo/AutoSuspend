@@ -101,7 +101,7 @@ $idleLimitMinutes     = 35      # Minutos de inactividad antes de evaluar suspen
 $checkIntervalSeconds = 60     # Frecuencia de revisión en segundos
 $audioThreshold       = 0.005  # Nivel mínimo de volumen para considerar que hay audio
 $audioGraceMinutes    = 5      # Minutos de gracia compartidos por las tres fuentes
-$networkThresholdMBps = 3      # MB/s mínimos para considerar descarga activa (1 MB/s = 8 Mbps)
+$networkThresholdMBps = 1      # MB/s mínimos para considerar descarga activa (1 MB/s = 8 Mbps)
 $maxLogSizeBytes      = 2MB    # Tamaño en MB del archivo .log
 ```
 
