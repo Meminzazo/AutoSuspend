@@ -1,12 +1,12 @@
 # 🖥️ AutoSuspend
 
-Script de PowerShell que suspende automáticamente el PC tras un periodo de inactividad, siempre que no haya actividad activa detectada: audio, llamada de Discord o descarga en un launcher de juegos.
+Script de PowerShell que suspende automáticamente el PC tras un periodo de inactividad, siempre que no haya actividad activa detectada: audio, llamada de Discord, tráfico de red con un launcher abierto o actividad de discos y USB.
 
 ---
 
 ## ¿Cómo funciona?
 
-Cada 60 segundos el script revisa el tiempo de inactividad. Al alcanzar **35 minutos**, comprueba tres fuentes de actividad. Cualquiera de ellas reinicia un **periodo de gracia compartido** de 5 minutos: mientras la gracia no expire, el PC no se suspende.
+Cada 60 segundos el script revisa el tiempo de inactividad. Al alcanzar **35 minutos**, comprueba cuatro fuentes de actividad. Cualquiera de ellas reinicia un **periodo de gracia compartido** de 5 minutos: mientras la gracia no expire, el PC no se suspende.
 
 ```
 ┌────────────────────────────────────────────────────────┐
@@ -14,7 +14,7 @@ Cada 60 segundos el script revisa el tiempo de inactividad. Al alcanzar **35 min
 │                                                        │
 │  ¿Inactivo >= 35 min?                                   │
 │       │                                                │
-│      SÍ ──► ¿Audio / Discord en llamada / Descarga?   │
+│      SÍ ──► ¿Audio / Discord / Red / Discos-USB?   │
 │       │                    │                           │
 │       │                   SÍ ──► 🔄 Reiniciar gracia  │
 │       │                    │                           │
@@ -32,9 +32,15 @@ Cada 60 segundos el script revisa el tiempo de inactividad. Al alcanzar **35 min
 
 **Audio** — Lee el nivel de volumen pico del dispositivo de salida predeterminado via Core Audio API. Cualquier sonido por encima del umbral configurable reinicia la gracia.
 
-**Actividad UDP de Discord** *(experimental)* — Busca en la salida de `netstat` entradas UDP asociadas al proceso `discord.exe` cuyo puerto local sea igual o superior a `50000`. Es un indicador indirecto de actividad de voz/video, no una confirmación fiable de que haya una llamada activa; puede haber falsos positivos o negativos.
+**Llamadas de Discord** — Lee las transiciones de voz RTC del cliente de escritorio en `%APPDATA%\discord\logs\renderer_js.log`. Reconoce la conexión y desconexión sin depender de puertos UDP ni de que haya sonido; silenciar el micrófono o ensordecerse no termina la llamada. Solo considera los eventos de la sesión actual de Discord y de la conexión de voz (`default`), no los eventos de transmisión (`stream`).
+
+Al iniciar, lee el registro existente para detectar una llamada ya conectada. Después conserva el estado y procesa únicamente los bytes nuevos, comprobando una huella de 64 bytes para detectar reescrituras. Si el archivo se reemplaza o trunca, vuelve a leerlo; conserva el estado conocido durante la rotación y espera a que las líneas incompletas terminen. Al reiniciarse Discord, descarta el estado de la sesión anterior. La lectura no mantiene el archivo abierto entre comprobaciones.
+
+Si Discord está conectando o reconectando, o está abierto pero no puede verificarse su estado, el script aplaza la suspensión y registra el motivo. Esto también puede ocurrir al abrir Discord antes de la primera llamada. El formato del registro es interno de Discord y puede cambiar; la detección no cubre Discord en el navegador ni otras variantes del cliente.
 
 **Tráfico de red con launchers abiertos** *(experimental)* — Si detecta abierto al menos uno de los launchers compatibles, mide el total de bytes recibidos por los adaptadores de red durante un intervalo de 2 segundos. Si la tasa supera el umbral configurado, se considera actividad. La medición **no está asociada al proceso del launcher**: también puede contar tráfico de Windows u otras aplicaciones. Launchers comprobados: Steam, Epic Games, GOG Galaxy, Battle.net, EA App y Origin.
+
+**Discos y USB** — Si no se detectó ninguna de las actividades anteriores, mide la lectura y escritura total de los discos físicos durante 5 segundos mediante los contadores de Windows. Con una tasa igual o superior a `$diskThresholdMBps` (1 MB/s por defecto), reinicia la gracia. Ayuda a proteger copias entre discos y memorias USB, pero también puede contar instalaciones, descompresiones u otras tareas de disco. Las transferencias inferiores al umbral pueden pasar inadvertidas. Si los contadores no están disponibles, aplaza la suspensión y escribe un aviso.
 
 ---
 
@@ -117,17 +123,22 @@ Abre `AutoSuspend.ps1` y edita las variables al inicio del archivo:
 $idleLimitMinutes     = 35      # Minutos de inactividad antes de evaluar suspensión
 $checkIntervalSeconds = 60     # Frecuencia de revisión en segundos
 $audioThreshold       = 0.005  # Nivel mínimo de volumen para considerar que hay audio
-$audioGraceMinutes    = 5      # Minutos de gracia compartidos por las tres fuentes
+$audioGraceMinutes    = 5      # Minutos de gracia compartidos por las cuatro fuentes
 $networkThresholdMBps = 1      # MB/s mínimos para considerar descarga activa (1 MB/s = 8 Mbps)
+$diskThresholdMBps    = 1      # MB/s de lectura + escritura total en discos/USB
 $maxLogSizeBytes      = 2MB    # Tamaño en MB del archivo .log
 ```
 
 ### Sobre la gracia de actividad
 
-`$audioGraceMinutes` es un temporizador compartido. Cualquiera de las tres fuentes (audio, Discord, descarga) puede reiniciarlo. El PC no se suspenderá mientras haya pasado menos de ese tiempo desde la última actividad detectada, sin importar cuál fue.
+`$audioGraceMinutes` es un temporizador compartido. Cualquiera de las cuatro fuentes (audio, Discord, red o discos/USB) puede reiniciarlo. El PC no se suspenderá mientras haya pasado menos de ese tiempo desde la última actividad detectada, sin importar cuál fue.
 
-- Si tus llamadas tienen silencios largos, sube este valor (ej. `10`).
+- La llamada conectada mantiene la protección aunque haya silencio; aumenta este valor si quieres más margen entre actividades (ej. `10`).
 - Si quieres que el PC suspenda más rápido tras cerrar el audio, bájalo (ej. `2`).
+
+### Sobre el umbral de discos y USB
+
+`$diskThresholdMBps` usa el total de lectura y escritura de todos los discos físicos. Una copia puede generar ambas operaciones, por lo que la cifra no equivale necesariamente a la velocidad mostrada por el Explorador. Baja el umbral para proteger transferencias más lentas o súbelo para reducir detecciones por actividad de fondo. Un valor muy bajo puede impedir la suspensión mientras haya trabajo de disco habitual.
 
 ### Sobre el umbral de red
 
@@ -149,10 +160,10 @@ El valor predeterminado del script es `1` MB/s. Puedes aumentarlo para reducir d
 El script genera `autosuspend.log` en la misma carpeta, con un tamaño máximo de 2 MB (configurable mediante `$maxLogSizeBytes`). Al alcanzar el límite, el archivo se elimina y se vuelve a crear; no se conserva un historial anterior. El log indica qué fuente reinició la gracia en cada ciclo:
 
 ```
-[2026-05-24 21:00:00][INFO] Servicio AutoSuspend iniciado. Limite: 35 min | Gracia: 5 min | Red: >1 MB/s | Intervalo: 60 seg.
+[2026-05-24 21:00:00][INFO] Servicio AutoSuspend iniciado. Limite: 35 min | Gracia: 5 min | Red: >1 MB/s | Discos/USB: >=1 MB/s | Intervalo: 60 seg.
 [2026-05-24 21:04:00][INFO] Inactivo 2100 seg | Actividad detectada: audio (Vol: 0.3421). Gracia reiniciada.
 [2026-05-24 21:06:00][INFO] Inactivo 2220 seg | Sin actividad, en gracia. Faltan 240 seg para suspender.
-[2026-05-24 21:08:00][INFO] Inactivo 2340 seg | Actividad detectada: actividad UDP de Discord. Gracia reiniciada.
+[2026-05-24 21:08:00][INFO] Inactivo 2340 seg | Actividad detectada: Discord en llamada, reconectando o sin estado verificable. Gracia reiniciada.
 [2026-05-24 21:10:00][INFO] Inactivo 2460 seg | Actividad detectada: tráfico de red con launcher abierto (45.3 MB/s). Gracia reiniciada.
 [2026-05-24 21:20:00][INFO] Inactivo 3060 seg | Sin actividad y gracia expirada. Suspendiendo...
 ```
