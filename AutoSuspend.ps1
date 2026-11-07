@@ -1,4 +1,4 @@
-﻿# ==============================================================================
+# ==============================================================================
 # AutoSuspend.ps1 — Suspende el PC tras inactividad si no hay actividad activa
 # Detecta: audio, llamada de Discord, descargas en launchers y actividad de discos/USB
 # ==============================================================================
@@ -303,18 +303,19 @@ $script:discordRtcReader = New-Object DiscordRtcIncrementalReader
 function Get-DiscordInCall {
     try {
         $discordProcs = @(Get-Process -Name 'discord' -ErrorAction SilentlyContinue)
-        if ($discordProcs.Count -eq 0) { $script:discordRtcReader.Reset(); return $false }
+        if ($discordProcs.Count -eq 0) { $script:discordRtcReader.Reset(); return 'disconnected' }
         $started = ($discordProcs | Sort-Object StartTime | Select-Object -First 1).StartTime
         $path = Join-Path $env:APPDATA 'discord\logs\renderer_js.log'
         $state = $script:discordRtcReader.Read($path, $started)
         if (-not [string]::IsNullOrEmpty($state)) {
-            return $state -notin @('RTC_DISCONNECTED', 'DISCONNECTED')
+            if ($state -in @('RTC_DISCONNECTED', 'DISCONNECTED')) { return 'disconnected' }
+            return 'connected'
         }
-        Write-Log 'Discord abierto sin estado RTC verificable; se aplaza la suspension.' 'WARN'
-        return $true
+        Write-Log 'Discord abierto sin estado RTC verificable.' 'WARN'
+        return 'unknown'
     } catch {
-        Write-Log "Error leyendo estado de voz de Discord; se aplaza la suspension: $_" 'WARN'
-        return $true
+        Write-Log "Error leyendo estado de voz de Discord: $_" 'WARN'
+        return 'unknown'
     }
 }
 # --- DETECCIÓN DE DESCARGA ACTIVA EN LAUNCHERS [EXPERIMENTAL] ---
@@ -379,6 +380,7 @@ function Get-DiskTransferMBps {
 Write-Log "Servicio AutoSuspend iniciado. Limite: $idleLimitMinutes min | Gracia: $audioGraceMinutes min | Red: >$networkThresholdMBps MB/s | Discos/USB: >=$diskThresholdMBps MB/s | Intervalo: $checkIntervalSeconds seg."
 
 $lastActivityTime = $null   # Gracia compartida: audio + Discord + descargas + discos/USB
+$discordUnknownSince = $null
 
 $testVol = Get-AudioVolume
 Write-Log "Prueba de audio al inicio: $testVol"
@@ -397,10 +399,13 @@ while ($true) {
         }
 
         # -- 2. Llamada de Discord (registro RTC) --
-        if (-not $activityReason) {
-            $inCall = Get-DiscordInCall
-            if ($inCall) {
-                $activityReason = "Discord en llamada, reconectando o sin estado verificable"
+        $discordState = Get-DiscordInCall
+        if ($discordState -eq 'unknown') {
+            if ($null -eq $discordUnknownSince) { $discordUnknownSince = Get-Date }
+        } else {
+            $discordUnknownSince = $null
+            if (-not $activityReason -and $discordState -eq 'connected') {
+                $activityReason = "Discord en llamada o reconectando"
             }
         }
 
@@ -425,6 +430,9 @@ while ($true) {
         if ($activityReason) {
             $lastActivityTime = Get-Date
             Write-Log "Inactivo $secondsIdle seg | Actividad detectada: $activityReason. Gracia reiniciada."
+        } elseif ($null -ne $discordUnknownSince -and ((Get-Date) - $discordUnknownSince).TotalSeconds -lt $audioGraceSeconds) {
+            $remainingDiscord = [math]::Ceiling($audioGraceSeconds - ((Get-Date) - $discordUnknownSince).TotalSeconds)
+            Write-Log "Inactivo $secondsIdle seg | Discord sin estado verificable. Espera restante: $remainingDiscord seg."
         } else {
             $secondsSinceActivity = if ($null -eq $lastActivityTime) {
                 [int]::MaxValue
@@ -436,6 +444,7 @@ while ($true) {
                 $remainingGrace = $audioGraceSeconds - $secondsSinceActivity
                 Write-Log "Inactivo $secondsIdle seg | Sin actividad, en gracia. Faltan $remainingGrace seg para suspender."
             } else {
+                if ($null -ne $discordUnknownSince) { Write-Log 'Espera por Discord sin estado verificable agotada; se permite suspender.' 'WARN' }
                 Write-Log "Inactivo $secondsIdle seg | Sin actividad y gracia expirada. Suspendiendo..."
                 [System.Windows.Forms.Application]::SetSuspendState(
                     [System.Windows.Forms.PowerState]::Suspend,
@@ -446,8 +455,10 @@ while ($true) {
             }
         }
     } else {
+        $discordUnknownSince = $null
         Write-Log "Sistema activo. Inactivo: $secondsIdle seg / $idleLimitSeconds seg requeridos."
     }
 
     Start-Sleep -Seconds $checkIntervalSeconds
 }
+
