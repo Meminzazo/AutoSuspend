@@ -6,27 +6,25 @@ Script de PowerShell que suspende automáticamente el PC tras un periodo de inac
 
 ## ¿Cómo funciona?
 
-Cada 60 segundos el script revisa el tiempo de inactividad. Al alcanzar **35 minutos**, comprueba cuatro fuentes de actividad. Cualquiera de ellas reinicia un **periodo de gracia compartido** de 5 minutos: mientras la gracia no expire, el PC no se suspende.
+Cada 60 segundos el script revisa el tiempo de inactividad. Al alcanzar **35 minutos**, comprueba cuatro fuentes de actividad. La actividad detectada reinicia un **periodo de gracia compartido** de 5 minutos: mientras la gracia no expire, el PC no se suspende. Discord sin estado verificable tiene una espera independiente, explicada más abajo.
 
+```text
+Cada 60 segundos, revisar inactividad
+  ├─ Menos de 35 minutos → esperar y reiniciar la espera de Discord
+  └─ 35 minutos o más
+       ├─ Comprobar audio y estado de Discord
+       ├─ Si no hay audio ni llamada detectada, comprobar red y discos
+       ├─ ¿Hay actividad detectada o no se pueden comprobar los discos?
+       │    └─ Sí → reiniciar la gracia de 5 minutos y esperar
+       └─ No
+            ├─ ¿Discord no verificable y espera menor a 5 minutos?
+            │    └─ Sí → esperar
+            ├─ ¿Sigue vigente la gracia de actividad?
+            │    └─ Sí → esperar
+            └─ No → suspender
 ```
-┌────────────────────────────────────────────────────────┐
-│  Cada 60 segundos                                      │
-│                                                        │
-│  ¿Inactivo >= 35 min?                                   │
-│       │                                                │
-│      SÍ ──► ¿Audio / Discord / Red / Discos-USB?   │
-│       │                    │                           │
-│       │                   SÍ ──► 🔄 Reiniciar gracia  │
-│       │                    │                           │
-│       │                   NO ──► ¿Gracia expirada?    │
-│       │                               │               │
-│       │                              SÍ ──► 💤 Suspender
-│       │                               │               │
-│       │                              NO ──► ⏳ Esperar │
-│       │                                                │
-│      NO ──► ⏳ Esperar                                 │
-└────────────────────────────────────────────────────────┘
-```
+
+La espera de Discord desconocido empieza al comprobar ese estado y corre en paralelo con las demás comprobaciones. Si Discord pasa a un estado verificable, se reinicia. Las mediciones y el intervalo pueden retrasar la siguiente revisión.
 
 ### Fuentes de actividad detectadas
 
@@ -36,7 +34,9 @@ Cada 60 segundos el script revisa el tiempo de inactividad. Al alcanzar **35 min
 
 Al iniciar, lee el registro existente para detectar una llamada ya conectada. Después conserva el estado y procesa únicamente los bytes nuevos, comprobando una huella de 64 bytes para detectar reescrituras. Si el archivo se reemplaza o trunca, vuelve a leerlo; conserva el estado conocido durante la rotación y espera a que las líneas incompletas terminen. Al reiniciarse Discord, descarta el estado de la sesión anterior. La lectura no mantiene el archivo abierto entre comprobaciones.
 
-Si Discord está conectando o reconectando, o está abierto pero no puede verificarse su estado, el script aplaza la suspensión y registra el motivo. Esto también puede ocurrir al abrir Discord antes de la primera llamada. El formato del registro es interno de Discord y puede cambiar; la detección no cubre Discord en el navegador ni otras variantes del cliente.
+Si Discord está conectando o reconectando, el script aplaza la suspensión. Si está abierto pero su estado no se puede verificar, espera hasta 5 minutos desde la primera comprobación con inactividad y registra el motivo. Al agotarse la espera, sigue evaluando audio, red, discos y la gracia de actividad antes de suspender. La espera se reinicia cuando vuelve la actividad del usuario o se obtiene un estado verificable. Puede tardar algo más por el intervalo de revisión y las mediciones.
+
+**Limitación:** una llamada silenciosa cuyo estado no pueda verificarse podría interrumpirse después de esa espera si no se detecta otra actividad. El formato del registro es interno de Discord y puede cambiar; la detección no cubre Discord en el navegador ni otras variantes del cliente.
 
 **Tráfico de red con launchers abiertos** *(experimental)* — Si detecta abierto al menos uno de los launchers compatibles, mide el total de bytes recibidos por los adaptadores de red durante un intervalo de 2 segundos. Si la tasa supera el umbral configurado, se considera actividad. La medición **no está asociada al proceso del launcher**: también puede contar tráfico de Windows u otras aplicaciones. Launchers comprobados: Steam, Epic Games, GOG Galaxy, Battle.net, EA App y Origin.
 
@@ -123,7 +123,7 @@ Abre `AutoSuspend.ps1` y edita las variables al inicio del archivo:
 $idleLimitMinutes     = 35      # Minutos de inactividad antes de evaluar suspensión
 $checkIntervalSeconds = 60     # Frecuencia de revisión en segundos
 $audioThreshold       = 0.005  # Nivel mínimo de volumen para considerar que hay audio
-$audioGraceMinutes    = 5      # Minutos de gracia compartidos por las cuatro fuentes
+$audioGraceMinutes    = 5      # Gracia de actividad y espera máxima de Discord no verificable
 $networkThresholdMBps = 1      # MB/s mínimos para considerar descarga activa (1 MB/s = 8 Mbps)
 $diskThresholdMBps    = 1      # MB/s de lectura + escritura total en discos/USB
 $maxLogSizeBytes      = 2MB    # Tamaño en MB del archivo .log
@@ -133,7 +133,7 @@ $maxLogSizeBytes      = 2MB    # Tamaño en MB del archivo .log
 
 `$audioGraceMinutes` es un temporizador compartido. Cualquiera de las cuatro fuentes (audio, Discord, red o discos/USB) puede reiniciarlo. El PC no se suspenderá mientras haya pasado menos de ese tiempo desde la última actividad detectada, sin importar cuál fue.
 
-- La llamada conectada mantiene la protección aunque haya silencio; aumenta este valor si quieres más margen entre actividades (ej. `10`).
+- La llamada detectada mantiene la protección aunque haya silencio; aumenta este valor si quieres más margen entre actividades (ej. `10`). Este valor también controla la espera por Discord no verificable.
 - Si quieres que el PC suspenda más rápido tras cerrar el audio, bájalo (ej. `2`).
 
 ### Sobre el umbral de discos y USB
@@ -163,8 +163,9 @@ El script genera `autosuspend.log` en la misma carpeta, con un tamaño máximo d
 [2026-05-24 21:00:00][INFO] Servicio AutoSuspend iniciado. Limite: 35 min | Gracia: 5 min | Red: >1 MB/s | Discos/USB: >=1 MB/s | Intervalo: 60 seg.
 [2026-05-24 21:04:00][INFO] Inactivo 2100 seg | Actividad detectada: audio (Vol: 0.3421). Gracia reiniciada.
 [2026-05-24 21:06:00][INFO] Inactivo 2220 seg | Sin actividad, en gracia. Faltan 240 seg para suspender.
-[2026-05-24 21:08:00][INFO] Inactivo 2340 seg | Actividad detectada: Discord en llamada, reconectando o sin estado verificable. Gracia reiniciada.
-[2026-05-24 21:10:00][INFO] Inactivo 2460 seg | Actividad detectada: tráfico de red con launcher abierto (45.3 MB/s). Gracia reiniciada.
+[2026-05-24 21:08:00][WARN] Discord abierto sin estado RTC verificable.
+[2026-05-24 21:08:00][INFO] Inactivo 2340 seg | Discord sin estado verificable. Espera restante: 300 seg.
+[2026-05-24 21:10:00][INFO] Inactivo 2460 seg | Actividad detectada: descarga activa en launcher (45.3 MB/s). Gracia reiniciada.
 [2026-05-24 21:20:00][INFO] Inactivo 3060 seg | Sin actividad y gracia expirada. Suspendiendo...
 ```
 
